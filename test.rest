@@ -1,7 +1,12 @@
 
 # create a short url
 POST http://127.0.0.1:6688/
+Content-Type: application/json
+
+{
+    "url": "www.google.com"
+}
 
 
 # get url
-GET http://127.0.0.1:6688/short
+GET http://127.0.0.1:6688/gUaEuF

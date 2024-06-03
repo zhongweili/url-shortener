@@ -1,3 +1,5 @@
+use std::env;
+
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing::{info, level_filters::LevelFilter};
@@ -9,12 +11,11 @@ async fn main() -> Result<()> {
     let layer = Layer::new().with_filter(LevelFilter::INFO);
     tracing_subscriber::registry().with(layer).init();
 
-    let addr = "0.0.0.0:6688".to_owned();
+    let addr = "127.0.0.1:6688".to_owned();
 
-    let state = AppState::try_new(String::from(
-        "postgres://postgres:postgres@localhost:5432/shortener",
-    ))
-    .await?;
+    let database_url = env::var("DATABASE_URL")?;
+    let state = AppState::try_new(database_url).await?;
+
     let app = get_router(state).await?;
     let listener = TcpListener::bind(&addr).await?;
     info!("Listening on: {}", addr);
