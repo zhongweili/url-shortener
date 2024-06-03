@@ -1,0 +1,7 @@
+
+# create a short url
+POST http://127.0.0.1:6688/
+
+
+# get url
+GET http://127.0.0.1:6688/short
