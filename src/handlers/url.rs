@@ -10,7 +10,8 @@ use axum_macros::debug_handler;
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use sqlx::prelude::FromRow;
-use tracing::{debug, warn};
+use thiserror::Error;
+use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 pub struct ShortenReq {
@@ -33,18 +34,50 @@ struct UrlRecord {
     clicks: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MyError {
+    error: String,
+}
+
+#[derive(Error, Debug)]
+pub enum UrlError {
+    #[error("sql error: {0}")]
+    SqlxError(#[from] sqlx::Error),
+    #[error("url already existed: {0}")]
+    UrlExisted(String),
+    #[error("url not found: {0}")]
+    UrlNotFound(String),
+}
+
+impl IntoResponse for UrlError {
+    fn into_response(self) -> axum::response::Response {
+        let status_code = match self {
+            Self::SqlxError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::UrlExisted(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::UrlNotFound(_) => StatusCode::NOT_FOUND,
+        };
+        (
+            status_code,
+            Json(MyError {
+                error: self.to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
 #[debug_handler]
 pub async fn shorten_handler(
     State(state): State<AppState>,
     Json(data): Json<ShortenReq>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, UrlError> {
     let id = nanoid!(6);
     let url_record = state
         .add_url_entry(data.url.as_str(), &id)
         .await
         .map_err(|e| {
             warn!("got error {} when adding to db", e);
-            StatusCode::UNPROCESSABLE_ENTITY
+            UrlError::UrlExisted(data.url)
         })?;
 
     let body = Json(ShortenRes {
@@ -57,12 +90,11 @@ pub async fn shorten_handler(
 pub async fn redirect_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, UrlError> {
     let url = state.get_url(&id).await.map_err(|e| {
         warn!("got error {} when getting url", e);
-        StatusCode::NOT_FOUND
+        UrlError::UrlNotFound(id)
     })?;
-    debug!("get url: {} from: {}", url, id);
     let mut headers = HeaderMap::new();
     headers.insert(LOCATION, url.parse().unwrap());
     Ok((StatusCode::PERMANENT_REDIRECT, headers))
