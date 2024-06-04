@@ -1,5 +1,4 @@
 use crate::AppState;
-use anyhow::Result;
 use axum::{
     extract::{Path, State},
     http::{header::LOCATION, HeaderMap, StatusCode},
@@ -71,14 +70,7 @@ pub async fn shorten_handler(
     State(state): State<AppState>,
     Json(data): Json<ShortenReq>,
 ) -> Result<impl IntoResponse, UrlError> {
-    let id = nanoid!(6);
-    let url_record = state
-        .add_url_entry(data.url.as_str(), &id)
-        .await
-        .map_err(|e| {
-            warn!("got error {} when adding to db", e);
-            UrlError::UrlExisted(data.url)
-        })?;
+    let url_record = state.add_url_entry(data.url.as_str()).await?;
 
     let body = Json(ShortenRes {
         url: format!("http://127.0.0.1:6688/{}", url_record.id),
@@ -91,37 +83,58 @@ pub async fn redirect_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, UrlError> {
-    let url = state.get_url(&id).await.map_err(|e| {
-        warn!("got error {} when getting url", e);
-        UrlError::UrlNotFound(id)
-    })?;
+    let url = state.get_url_entry(&id).await?;
     let mut headers = HeaderMap::new();
     headers.insert(LOCATION, url.parse().unwrap());
     Ok((StatusCode::PERMANENT_REDIRECT, headers))
 }
 
 impl AppState {
-    async fn add_url_entry(&self, url: &str, id: &str) -> Result<UrlRecord> {
-        let url_record: UrlRecord =
-            sqlx::query_as("INSERT INTO urls (id, url) VALUES ($1, $2) RETURNING id")
-                .bind(id)
-                .bind(url)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(url_record)
+    async fn add_url_entry(&self, url: &str) -> Result<UrlRecord, UrlError> {
+        loop {
+            let id = nanoid!(6);
+            let result = sqlx::query_as::<_, UrlRecord>(
+                "INSERT INTO urls (id, url) VALUES ($1, $2) RETURNING id",
+            )
+            .bind(&id)
+            .bind(url)
+            .fetch_one(&self.pool)
+            .await;
+            match result {
+                Ok(url_record) => return Ok(url_record),
+                Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23505") => {
+                    if let Some(constraint) = e.constraint() {
+                        if constraint == "urls_pkey" {
+                            warn!("duplicated id {}, db error: {}", id, e);
+                            continue;
+                        } else if constraint == "urls_url_key" {
+                            warn!("duplicated url {}, db error: {}", url, e);
+                            return Err(UrlError::UrlExisted(url.to_owned()));
+                        }
+                    }
+                }
+                Err(e) => return Err(UrlError::SqlxError(e)),
+            }
+        }
     }
 
-    async fn get_url(&self, id: &str) -> Result<String> {
+    async fn get_url_entry(&self, id: &str) -> Result<String, UrlError> {
+        let result =
+            sqlx::query_as::<_, UrlRecord>("SELECT id, url, clicks FROM urls WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await;
+
+        let url_record = match result {
+            Ok(Some(url_record)) => url_record,
+            Ok(None) => return Err(UrlError::UrlNotFound(id.to_owned())),
+            Err(e) => return Err(UrlError::SqlxError(e)),
+        };
+
         sqlx::query("UPDATE urls SET clicks = clicks + 1 WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;
-
-        let url_record: UrlRecord =
-            sqlx::query_as("SELECT id, url, clicks FROM urls WHERE id = $1")
-                .bind(id)
-                .fetch_one(&self.pool)
-                .await?;
 
         Ok(url_record.url)
     }
